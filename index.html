@@ -366,7 +366,7 @@ const I={
 };
 
 /* ================= 定数 ================= */
-const ST={want:{l:'読みたい'},reserved:{l:'図書館から連絡待ち'},arrived:{l:'借りに行く'},borrowed:{l:'借りている'},returned:{l:'返却済み'},reading:{l:'読んでいる'},done:{l:'読了'}};
+const ST={want:{l:'読みたい'},reserved:{l:'予約中'},arrived:{l:'届いた'},borrowed:{l:'借りている'},returned:{l:'返却済み'},reading:{l:'読んでいる'},done:{l:'読み終えた'}};
 const GENRES=['小説','ミステリー','時代・歴史小説','エッセイ','ノンフィクション','歴史','健康・医療','暮らし・料理','趣味・旅','社会・経済','詩・短歌・俳句','絵本・児童書','その他'];
 const CCODE_GENRE={'93':'小説','97':'小説','98':'小説','91':'小説','95':'エッセイ','92':'詩・短歌・俳句','20':'歴史','21':'歴史','22':'歴史','23':'歴史','25':'趣味・旅','26':'趣味・旅','47':'健康・医療','75':'暮らし・料理','76':'暮らし・料理','77':'暮らし・料理','30':'社会・経済','31':'社会・経済','32':'社会・経済','33':'社会・経済','34':'社会・経済','36':'社会・経済','71':'趣味・旅','72':'趣味・旅','73':'趣味・旅','10':'ノンフィクション','11':'ノンフィクション','12':'ノンフィクション','14':'ノンフィクション','15':'ノンフィクション'};
 const FORM_MAP={'0':'単行本','1':'文庫','2':'新書','3':'全集・双書','4':'ムック','5':'事典','6':'図鑑','7':'絵本','9':'コミック'};
@@ -421,11 +421,8 @@ const S={
  get notifyDays(){return store.get('notifyDays',2)},
  get notifyTime(){return store.get('notifyTime','09:00')},
  get apiKey(){return store.get('apiKey','')},
- get geminiKey(){return store.get('geminiKey','')},
- get provider(){return store.get('provider','gemini')},
  get model(){return store.get('model','claude-sonnet-5-5')}
 };
-const aiReady=()=>S.provider==='claude'?!!S.apiKey:!!S.geminiKey;
 function lib(name){return S.libs.find(l=>l.name===name)||{name,loanDays:14,holdDays:7}}
 
 /* ================= ISBN ================= */
@@ -519,13 +516,10 @@ async function applyInfo(b,info){
  return b
 }
 
-/* ================= AI 読み取り（Gemini＝無料 / Claude＝有料） ================= */
+/* ================= AI 読み取り（Claude） ================= */
 async function aiCall(imageDataURL,prompt,tool){
- if(!navigator.onLine)throw {code:'offline'};
- return S.provider==='claude'?claudeCall(imageDataURL,prompt,tool):geminiCall(imageDataURL,prompt,tool)
-}
-async function claudeCall(imageDataURL,prompt,tool){
  const key=S.apiKey;if(!key)throw {code:'nokey'};
+ if(!navigator.onLine)throw {code:'offline'};
  let r;
  try{r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
   body:JSON.stringify({model:S.model,max_tokens:3000,tools:[tool],tool_choice:{type:'tool',name:tool.name},messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:imageDataURL.split(',')[1]}},{type:'text',text:prompt}]}]})})}
@@ -533,39 +527,9 @@ async function claudeCall(imageDataURL,prompt,tool){
  if(!r.ok){let m='';try{m=(await r.json()).error.message}catch{}throw {code:r.status===401?'badkey':(r.status===429||r.status>=500)?'busy':'other',message:m}}
  const j=await r.json();const tu=(j.content||[]).find(c=>c.type==='tool_use');if(!tu)throw {code:'other'};return tu.input
 }
-/* Gemini: 無料枠。名前の変更に備えて、使えるモデルを順に試す */
-const GEMINI_MODELS=['gemini-flash-latest','gemini-2.5-flash','gemini-flash-lite-latest','gemini-2.5-flash-lite'];
-function toGeminiSchema(x){if(Array.isArray(x))return x.map(toGeminiSchema);if(!x||typeof x!=='object')return x;const o={};for(const [k,v] of Object.entries(x)){if(k==='type')o.type=String(v).toUpperCase();else if(k==='properties'){o.properties={};for(const [pk,pv] of Object.entries(v))o.properties[pk]=toGeminiSchema(pv)}else if(k==='items')o.items=toGeminiSchema(v);else o[k]=v}return o}
-function parseJSONText(t){try{return JSON.parse(t)}catch{}const m=String(t).match(/\{[\s\S]*\}/);if(m){try{return JSON.parse(m[0])}catch{}}return null}
-async function geminiCall(imageDataURL,prompt,tool){
- const key=S.geminiKey;if(!key)throw {code:'nokey'};
- const body=JSON.stringify({contents:[{role:'user',parts:[{inline_data:{mime_type:'image/jpeg',data:imageDataURL.split(',')[1]}},{text:prompt+'\n\n結果はJSONだけで返してください。'}]}],generationConfig:{temperature:0.1,responseMimeType:'application/json',responseSchema:toGeminiSchema(tool.input_schema)}});
- const first=store.get('geminiModel','');const order=[...new Set([first,...GEMINI_MODELS].filter(Boolean))];
- let lastErr={code:'other'};
- for(const model of order){
-  let r;
-  try{r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':key},body})}
-  catch{throw {code:'offline'}}
-  if(r.ok){
-   const j=await r.json();const parts=(j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts)||[];
-   const text=parts.filter(p=>!p.thought&&p.text).map(p=>p.text).join('');const out=parseJSONText(text);
-   if(out){store.set('geminiModel',model);return out}
-   lastErr={code:'other',message:'読み取り結果が空でした'};continue
-  }
-  let m='',st='';try{const e=(await r.json()).error;m=e.message||'';st=e.status||''}catch{}
-  if(r.status===400&&/API key|API_KEY/i.test(m))throw {code:'badkey'};
-  if(r.status===401||r.status===403)throw {code:'badkey',message:m};
-  if(r.status===404){lastErr={code:'other',message:m};continue}          /* そのモデルが無い → 次へ */
-  if(r.status===429){lastErr={code:'quota'};continue}                    /* 今日の無料回数を超えた → 軽いモデルへ */
-  if(r.status>=500){lastErr={code:'busy'};continue}
-  lastErr={code:'other',message:m};continue
- }
- throw lastErr
-}
-function aiErrMsg(e){return {quota:'今日の無料で使える回数を使い切りました。明日もう一度お試しください（それまでは手で入力できます）',nokey:'AI読み取りの設定がされていません（設定画面で設定できます）',badkey:'AIのキーが正しくありません。設定を確認してください',busy:'AIが混み合っています。少し待ってからもう一度お試しください',offline:'電波のある場所でもう一度お試しください'}[e&&e.code]||('読み取れませんでした'+(e&&e.message?'（'+e.message+'）':''))}
+function aiErrMsg(e){return {nokey:'AI読み取りの設定がされていません（設定画面で設定できます）',badkey:'AIのキーが正しくありません。設定を確認してください',busy:'AIが混み合っています。少し待ってからもう一度お試しください',offline:'電波のある場所でもう一度お試しください'}[e&&e.code]||('読み取れませんでした'+(e&&e.message?'（'+e.message+'）':''))}
 const AD_TOOL={name:'record_books',description:'新聞広告に載っている本を記録する',input_schema:{type:'object',properties:{books:{type:'array',items:{type:'object',properties:{title:{type:'string',description:'本のタイトル（巻数を含む。キャッチコピーや帯の文句は含めない）'},author:{type:'string',description:'著者名（複数は「、」区切り。訳者は名前の後に「（訳）」）'},publisher:{type:'string',description:'出版社名'},genre:{type:'string',enum:GENRES}},required:['title','author','publisher','genre']}}},required:['books']}};
 const AD_PROMPT='これは日本の新聞に載った書籍の広告（出版社の新刊広告など）の写真です。縦書き・横書きが混在しています。広告されている本をすべて見つけ、タイトル・著者・出版社・ジャンルを記録してください。キャッチコピー、推薦文、価格、書店名は無視します。出版社名は広告の上下や隅にロゴとして1つだけ書かれていることが多いので、その場合は全部の本に同じ出版社を入れてください。読みにくい文字は文脈から最も自然な表記を推測し、どうしても分からない項目は空文字にしてください。';
-const TEST_IMG=(()=>{try{const c=document.createElement('canvas');c.width=240;c.height=80;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,240,80);x.fillStyle='#000';x.font='40px sans-serif';x.fillText('12345',40,55);return c.toDataURL('image/jpeg',.9)}catch{return ''}})();
 const MEMO_TOOL={name:'transcribe',description:'手書きの読書メモをテキストにする',input_schema:{type:'object',properties:{text:{type:'string',description:'書かれている文章（改行を保つ）'}},required:['text']}};
 const MEMO_PROMPT='これは本を読んだ人が紙に手書きした感想メモの写真です。書かれている文字をそのまま正確に文字にしてください。言い回しや誤字は直さず、改行は元の位置に近い形で保ってください。どうしても読めない文字は「〓」にしてください。罫線や紙の模様は無視します。';
 
@@ -587,7 +551,7 @@ function itemHTML(b){
  else if(b.status==='reserved'&&b.reserveDate)w=fmtD(b.reserveDate)+' 予約';
  return `<button class="item" data-open="${b.id}">${coverHTML(b)}<div class="meta"><div class="t">${esc(b.title||'（タイトル未入力）')}</div>${b.author?`<div class="a">${esc(b.author)}</div>`:''}<div class="line">${chipHTML(b)}${miniStars(b.rating)}${w?`<span class="num">${w}</span>`:''}</div></div></button>`
 }
-const ACTS={want:[['reserve','図書館で予約する',1],['buy','買う',0]],reserved:[['arrive','連絡が来たら押す',1]],arrived:[['borrow','借りてくる',1]],borrowed:[['return','返す',1],['renew','延長する',0]],reading:[['finish','読み終える',1]]};
+const ACTS={want:[['reserve','図書館で予約した',1],['buy','買った',0]],reserved:[['arrive','図書館に届いた',1]],arrived:[['borrow','借りてきた',1]],borrowed:[['return','返した',1],['renew','延長',0]],reading:[['finish','読み終えた',1]]};
 const actsFor=b=>ACTS[b.status]||[];
 function todoHTML(b){
  const d=dueInfo(b);let when='';
@@ -634,7 +598,7 @@ function viewHome(){
  const lastBk=store.get('lastBackup',0);const days=lastBk?Math.floor((Date.now()-lastBk)/864e5):null;
  if(BOOKS.length>=5&&(days===null||days>=30))h+=`<div class="banner" style="background:var(--ai-soft)"><p>${days===null?'まだ記録の控えを保存していません。':days+'日間、記録の控えを保存していません。'}</p><button class="btn" data-act="csvsave">${I.down}保存</button></div>`;
  const sec=(t,list)=>list.length?`<h2 class="sec">${t} <small>${list.length}冊</small></h2><div class="stack">${list.map(todoHTML).join('')}</div>`:'';
- h+=sec('返す本',borrowed)+sec('借りに行く本',arrived)+sec('図書館から連絡待ちの本',reserved)+sec('読んでいる本（購入）',reading);
+ h+=sec('返す本',borrowed)+sec('受け取りに行く本',arrived)+sec('予約している本',reserved)+sec('読んでいる本（購入）',reading);
  const wl=UI.wantAll?want:want.slice(0,5);
  if(want.length)h+=`<h2 class="sec">読みたい本 <small>${want.length}冊</small></h2><div class="stack">${wl.map(todoHTML).join('')}</div>${want.length>5&&!UI.wantAll?`<button class="btn block" data-act="wantall" style="margin-top:12px">読みたい本をすべて見る（${want.length}冊）</button>`:''}`;
  if(!borrowed.length&&!arrived.length&&!reserved.length&&!reading.length&&!want.length)h+=emptyHTML('いまは予定がありません','次に読みたい本を「本を追加」から登録しましょう。','');
@@ -651,7 +615,7 @@ function filtered(){
 }
 function viewShelf(){
  const l=filtered();
- const fs=[['all','すべて'],['want','読みたい'],['lib','予約・貸出中'],['read','読了'],['other','そのほか']];
+ const fs=[['all','すべて'],['want','読みたい'],['lib','予約・貸出中'],['read','読み終えた'],['other','そのほか']];
  let h=header('本棚',`全${BOOKS.length}冊`)+'<main class="wrap">';
  h+=`<div class="search">${I.search}<input id="q" type="search" placeholder="タイトル・著者・メモで探す" value="${esc(UI.q)}" autocomplete="off" aria-label="本を探す"></div>`;
  h+=`<div class="chips">${fs.map(([k,t])=>`<button data-filter="${k}" aria-pressed="${UI.filter===k}">${t}</button>`).join('')}</div>`;
@@ -694,15 +658,9 @@ function viewSettings(){
   <button data-act="jsonsave">${I.down}<div class="grow">写真も含めた完全な控え<small>メモや広告の写真も残したいとき（ファイルが大きくなります）</small></div></button>
   <button data-act="jsonload">${I.up}<div class="grow">完全な控えから戻す</div></button>
  </div><p class="note">記録はインターネット上には送られず、このスマホの中だけに保存されます。アプリを消すと記録も消えるので、月に一度くらい控えを保存してください。</p>`;
- const pv=S.provider;
- h+=`<h2 class="sec">AIによる写真の読み取り</h2><div class="set">
-  <div>${I.spark}<div class="grow">使うAI<small>新聞広告・手書きメモの読み取りに使います</small></div><div class="seg"><button data-provider="gemini" aria-pressed="${pv==='gemini'}">Gemini（無料）</button><button data-provider="claude" aria-pressed="${pv==='claude'}">Claude（有料）</button></div></div>
-  ${pv==='gemini'?`<div><div class="grow">GeminiのAPIキー<small>${S.geminiKey?'設定済み':'未設定'}・Googleアカウントで無料で作れます</small></div></div><div><input id="geminiKey" type="password" placeholder="AIza…" value="${esc(S.geminiKey)}" autocomplete="off" style="flex:1;min-width:0" aria-label="GeminiのAPIキー"><button class="btn" data-act="gkeysave" style="min-height:46px">保存</button></div>`
-  :`<div><div class="grow">ClaudeのAPIキー<small>${S.apiKey?'設定済み':'未設定'}</small></div></div><div><input id="apiKey" type="password" placeholder="sk-ant-…" value="${esc(S.apiKey)}" autocomplete="off" style="flex:1;min-width:0" aria-label="ClaudeのAPIキー"><button class="btn" data-act="keysave" style="min-height:46px">保存</button></div><div><div class="grow">読み取りの精度</div><div class="seg"><button data-model="claude-sonnet-5-5" aria-pressed="${S.model==='claude-sonnet-5-5'}">高精度</button><button data-model="claude-haiku-5-5" aria-pressed="${S.model==='claude-haiku-5-5'}">節約</button></div></div>`}
-  ${aiReady()?`<button data-act="aitest">${I.check}<div class="grow">つながるか確認する</div></button>`:''}
- </div>
- <p class="note">${pv==='gemini'?'Gemini（Google）は無料で使えます。1日に使える回数に上限があり、上限を超えるとその日は使えません（翌日には戻ります）。無料版では、送った写真がGoogleのAIの改善に使われることがあります。新聞広告や読書メモ以外の、住所・電話番号などが写った写真は撮らないでください。':'Claude（Anthropic）は使った分だけ料金がかかります。送った写真がAIの学習に使われることはありません。'}記録の一覧そのものが送られることはありません。キーはこのスマホの中だけに保存されます。</p>`;
- h+=`<h2 class="sec">そのほか</h2><div class="set"><button data-act="sync">${I.refresh}<div class="grow">未取得の本の情報を取得<small>${BOOKS.filter(b=>b.pending).length}冊</small></div></button><button data-act="delphotos">${I.camera}<div class="grow">読み取りに使った写真をまとめて削除<small>新聞広告とメモの写真 ${BOOKS.reduce((n,b)=>n+(b.adPhoto?1:0)+(b.memoPhotos||[]).length,0)}枚・文字の情報は残ります</small></div></button><button data-act="wipe" style="color:var(--danger)">${I.trash}<div class="grow">すべての記録を削除</div></button></div><div id="wipeBox"></div><p class="note">読書帳 v2.2</p>`;
+ h+=`<h2 class="sec">AIによる写真の読み取り</h2><div class="set"><div>${I.spark}<div class="grow">Claude APIキー<small>${S.apiKey?'設定済み':'未設定（新聞広告・手書きメモの読み取りに必要）'}</small></div></div><div><input id="apiKey" type="password" placeholder="sk-ant-…" value="${esc(S.apiKey)}" autocomplete="off" style="flex:1;min-width:0" aria-label="APIキー"><button class="btn" data-act="keysave" style="min-height:46px">保存</button></div><div><div class="grow">読み取りの精度</div><div class="seg"><button data-model="claude-sonnet-5-5" aria-pressed="${S.model==='claude-sonnet-5-5'}">高精度</button><button data-model="claude-haiku-5-5" aria-pressed="${S.model==='claude-haiku-5-5'}">節約</button></div></div></div>
+  <p class="note">写真を読み取るときだけ、その写真がAnthropic社のAI（Claude）に送られます。記録そのものは送られません。キーはこのスマホの中だけに保存されます。</p>`;
+ h+=`<h2 class="sec">そのほか</h2><div class="set"><button data-act="sync">${I.refresh}<div class="grow">未取得の本の情報を取得<small>${BOOKS.filter(b=>b.pending).length}冊</small></div></button><button data-act="wipe" style="color:var(--danger)">${I.trash}<div class="grow">すべての記録を削除</div></button></div><div id="wipeBox"></div><p class="note">読書帳 v2.0</p>`;
  return h+'</main>'
 }
 
@@ -721,7 +679,7 @@ function renderDetail(first){
  if(b.status==='borrowed')h+=`<div class="row" style="margin-top:10px"><button class="btn" data-d="cal">${I.cal}${b.calAdded===b.dueDate?'カレンダー登録済み（もう一度）':'カレンダーに返却のお知らせを登録'}</button></div>`;
  const rows=[];const dateRow=(k,l)=>rows.push([l,`<input type="date" data-f="${k}" value="${esc(b[k])}" aria-label="${l}">`]);
  if(isLib){rows.push(['図書館',`<select data-f="library" aria-label="図書館"><option value="">選ぶ</option>${[...new Set([...S.libs.map(l=>l.name),b.library].filter(Boolean))].map(n=>`<option ${b.library===n?'selected':''}>${esc(n)}</option>`).join('')}</select>`]);
-  for(const [k,l] of [['reserveDate','予約した日'],['arriveDate','連絡があった日'],['borrowDate','借りた日'],['dueDate','返却期限'],['returnDate','返した日']])if(b[k])dateRow(k,l);
+  for(const [k,l] of [['reserveDate','予約した日'],['arriveDate','届いた日'],['borrowDate','借りた日'],['dueDate','返却期限'],['returnDate','返した日']])if(b[k])dateRow(k,l);
   if(b.status==='returned')dateRow('endDate','読み終えた日')}
  else if(b.route==='buy'){dateRow('startDate','買った日');if(b.endDate||b.status==='done')dateRow('endDate','読み終えた日')}
  if(rows.length)h+=`<ul class="timeline">${rows.map(([l,inp])=>`<li><span class="k">${l}</span>${inp}</li>`).join('')}</ul>`;
@@ -731,9 +689,9 @@ function renderDetail(first){
  h+=`<div class="field"><span class="lbl">ジャンル</span><div class="pills">${GENRES.map(g=>`<button data-d="genre" data-v="${g}" aria-pressed="${b.genre===g}">${g}</button>`).join('')}</div></div>`;
  h+=`<div class="field"><label for="memo">感想メモ</label><textarea id="memo" data-f="memo" class="notebook" rows="6" placeholder="思ったこと、心に残ったことを自由に">${esc(b.memo)}</textarea>
   <div class="row" style="margin-top:4px"><button class="btn" data-d="memophoto">${I.camera}紙のメモを撮って文字にする</button></div>
-  ${b.memoPhotos&&b.memoPhotos.length?`<div class="photos">${b.memoPhotos.map((p,i)=>`<figure><img src="${p.data}" alt="メモの写真${i+1}" data-d="viewphoto" data-v="${i}"><figcaption>${esc(fmtD(p.date))}</figcaption><button class="x" data-d="delphoto" data-v="${i}" aria-label="写真を削除">${I.close}</button></figure>`).join('')}</div><p class="muted" style="font-size:.78em;margin:6px 0 0">写真の右上の×で削除できます。写真を消しても、文字にした感想は残ります。</p>`:''}</div>`;
+  ${b.memoPhotos&&b.memoPhotos.length?`<div class="photos">${b.memoPhotos.map((p,i)=>`<figure><img src="${p.data}" alt="メモの写真${i+1}" data-d="viewphoto" data-v="${i}"><figcaption>${esc(fmtD(p.date))}</figcaption><button class="x" data-d="delphoto" data-v="${i}" aria-label="写真を削除">${I.close}</button></figure>`).join('')}</div>`:''}</div>`;
  h+=`<div class="field"><span class="lbl">評価</span><div class="stars">${[1,2,3,4,5].map(i=>`<button data-d="rate" data-v="${i}" aria-label="${i}つ星">${I.star.replace('<svg','<svg class="'+(i<=b.rating?'s-on':'s-off')+'"')}</button>`).join('')}</div></div>`;
- if(b.adPhoto)h+=`<div class="field"><span class="lbl">新聞広告の写真${b.wantDate?'（'+fmtD(b.wantDate)+'）':''}</span><img class="adimg" src="${b.adPhoto}" alt="新聞広告" data-d="viewad"><button class="btn" data-d="delad" style="margin-top:6px">${I.trash}この写真を削除</button><span class="muted" style="font-size:.78em">写真を消しても、タイトルなどの文字の情報は残ります</span></div>`;
+ if(b.adPhoto)h+=`<div class="field"><span class="lbl">新聞広告の写真${b.wantDate?'（'+fmtD(b.wantDate)+'）':''}</span><img class="adimg" src="${b.adPhoto}" alt="新聞広告" data-d="viewad"></div>`;
  if(b.desc)h+=`<div class="field"><span class="lbl">内容紹介</span><div class="desc">${esc(b.desc)}</div></div>`;
  h+=`<details class="more-info"><summary>本の情報を手で直す・削除</summary><div class="inner">
   <div class="field"><label for="f-title">タイトル</label><input id="f-title" data-f="title" value="${esc(b.title)}"></div>
@@ -760,7 +718,6 @@ async function onDetail(e){
  if(a==='cover'){$('#fileCover').click();return}
  if(a==='viewphoto'){showImage(b.memoPhotos[+t.dataset.v].data);return}
  if(a==='viewad'){showImage(b.adPhoto);return}
- if(a==='delad'){const p=b.adPhoto;b.adPhoto='';await saveBook(b);renderDetail();toast('写真を削除しました',async()=>{b.adPhoto=p;await saveBook(b);if(DETAIL===b.id)renderDetail()});return}
  if(a==='delphoto'){const i=+t.dataset.v;const p=b.memoPhotos.splice(i,1)[0];await saveBook(b);renderDetail();toast('写真を削除しました',async()=>{b.memoPhotos.splice(i,0,p);await saveBook(b);if(DETAIL===b.id)renderDetail()});return}
  if(a==='undo'){const h=b.history.pop();Object.assign(b,h.snap);await saveBook(b);renderDetail();toast('ひとつ前の状態に戻しました');return}
  if(a==='askdel'){$('#delBox').innerHTML=`<div class="banner" style="background:var(--danger-soft);flex-direction:column;align-items:stretch"><p>「${esc(b.title)}」を削除します。</p><div class="row"><button class="btn" data-d="nodel">やめる</button><button class="btn" data-d="dodel" style="background:var(--danger);color:#fff;border-color:var(--danger)">削除する</button></div></div>`;return}
@@ -782,17 +739,17 @@ const SNAPK=['status','route','library','reserveDate','arriveDate','borrowDate',
 function openStep(act,id){const b=findB(id);if(!b)return;STEP={act,id,lib:b.library||store.get('lastLib','')||(S.libs[0]&&S.libs[0].name)||'',fin:true};drawStep()}
 function drawStep(){
  const {act,id}=STEP;const b=findB(id);const L=lib(b.library||STEP.lib);
- const T={reserve:'図書館で予約する',arrive:'図書館から連絡が来た',borrow:'借りてくる',return:'返す',renew:'貸出を延長する',buy:'買う',finish:'読み終える'}[act];
+ const T={reserve:'図書館で予約した',arrive:'図書館に届いた',borrow:'借りてきた',return:'返した',renew:'貸出を延長した',buy:'買った',finish:'読み終えた'}[act];
  let h=`<div class="modal-bg" data-m="bg"><div class="modal" role="dialog" aria-modal="true" aria-label="${T}"><h3>${T}</h3><p class="for">『${esc(b.title)}』</p>`;
  const dateField=(lbl,val)=>`<div class="field"><label for="sd">${lbl}</label><input type="date" id="sd" value="${val}"></div>`;
  if(act==='reserve'){
   h+=`<div class="field"><span class="lbl">どこの図書館ですか</span>${S.libs.length?`<div class="pills">${S.libs.map(l=>`<button data-m="lib" data-v="${esc(l.name)}" aria-pressed="${STEP.lib===l.name}">${esc(l.name)}</button>`).join('')}</div>`:'<p class="muted" style="margin:0;font-size:.85em">まだ図書館が登録されていません。名前を入れて「追加」を押してください。</p>'}<div class="lib-add"><input id="stepNewLib" placeholder="ほかの図書館を追加" aria-label="図書館の名前"><button class="btn" data-m="libadd" style="min-height:48px">追加</button></div></div>`;
   h+=dateField('予約した日',today());
  }
- if(act==='arrive'){h+=dateField('連絡があった日',today());h+=`<div class="calc">受け取り期限の目安：<b id="calc">${fmtD(addDays(today(),L.holdDays))}</b><br><span style="font-size:.85em">（取り置き${L.holdDays}日として計算）</span></div>`}
+ if(act==='arrive'){h+=dateField('届いた日（連絡があった日）',today());h+=`<div class="calc">受け取り期限の目安：<b id="calc">${fmtD(addDays(today(),L.holdDays))}</b><br><span style="font-size:.85em">（取り置き${L.holdDays}日として計算）</span></div>`}
  if(act==='borrow'){h+=dateField('借りた日',today());h+=`<div class="calc">返却期限：<b id="calc">${fmtD(addDays(today(),L.loanDays-1))}</b><br><span style="font-size:.85em">（借りた日を含めて${L.loanDays}日間）</span></div>`}
  if(act==='renew'){h+=dateField('新しい返却期限',addDays(today(),L.loanDays-1));h+=`<p class="muted" style="font-size:.82em;margin:8px 0 0">図書館で教えてもらった新しい期限に合わせてください。</p>`}
- if(act==='return'){h+=dateField('返した日',today());h+=`<div class="field"><span class="lbl">最後まで読みましたか</span><div class="pills"><button data-m="fin" data-v="1" aria-pressed="${STEP.fin}">最後まで読んだ</button><button data-m="fin" data-v="0" aria-pressed="${!STEP.fin}">途中までで返した</button></div></div>`}
+ if(act==='return'){h+=dateField('返した日',today());h+=`<div class="field"><span class="lbl">読み終えましたか</span><div class="pills"><button data-m="fin" data-v="1" aria-pressed="${STEP.fin}">最後まで読んだ</button><button data-m="fin" data-v="0" aria-pressed="${!STEP.fin}">途中までで返した</button></div></div>`}
  if(act==='buy')h+=dateField('買った日',today());
  if(act==='finish')h+=dateField('読み終えた日',today());
  h+=`<div class="row"><button class="btn big" data-m="close">やめる</button><button class="btn primary big" data-m="ok">決定</button></div></div></div>`;
@@ -813,12 +770,12 @@ async function commitStep(){
  await saveBook(b);refresh();
  if(act==='borrow'||act==='renew'){drawAfterBorrow(b,act);return}
  clearModal();
- toast({reserve:'次は「図書館からの連絡」を待ちます',arrive:'次は「借りに行く」です',return:'返却済みにしました',buy:'「読んでいる本」に入れました',finish:'読了にしました'}[act],()=>undoStep(b))
+ toast({reserve:'「予約中」にしました',arrive:'「届いた」にしました',return:'「返却済み」にしました',buy:'「読んでいる本」にしました',finish:'「読み終えた」にしました'}[act],()=>undoStep(b))
 }
 function drawAfterBorrow(b,act){
  STEP={act,id:b.id};
  const needIsbn=act==='borrow'&&(!b.isbn||b.pending);
- setModal(`<div class="modal-bg" data-m="bg"><div class="modal" role="dialog" aria-modal="true"><div class="center"><div class="done-mark">${I.check}</div><h3>${act==='renew'?'新しい返却期限':'返却期限'}は ${fmtD(b.dueDate)}</h3><p class="for">期限までに返しましょう</p></div>
+ setModal(`<div class="modal-bg" data-m="bg"><div class="modal" role="dialog" aria-modal="true"><div class="center"><div class="done-mark">${I.check}</div><h3>${act==='renew'?'延長しました':'借りてきました'}</h3><p class="for">返却期限は <b>${fmtD(b.dueDate)}</b> です</p></div>
   <div class="stack" style="margin-top:18px"><button class="btn primary big block" data-m="cal">${I.cal}カレンダーに返却のお知らせを登録</button><p class="muted" style="font-size:.8em;margin:-4px 4px 0;text-align:center">${fmtD(calTimes(b).day)} ${S.notifyTime}にスマホが知らせます</p>
   ${needIsbn?`<button class="btn big block" data-m="scan">${I.scan}バーコードで本の情報を正確にする</button>`:''}
   <button class="btn ghost big block" data-m="close">閉じる</button></div></div></div>`)
@@ -872,7 +829,7 @@ function openAdd(){
 async function onAdd(e){
  const t=e.target.closest('[data-a]');if(!t)return;const a=t.dataset.a;
  if(a==='close'){closeSheet();return}
- if(a==='ad'){if(!aiReady()){drawTypeForm('新聞広告の読み取りには、最初に設定が必要です（設定 → AIによる写真の読み取り）。それまではタイトルを入力して登録できます。');return}$('#fileAd').click();return}
+ if(a==='ad'){if(!S.apiKey){drawTypeForm('新聞広告の読み取りには、最初に設定が必要です（設定 → AIによる写真の読み取り）。それまではタイトルを入力して登録できます。');return}$('#fileAd').click();return}
  if(a==='scan'){openScanner(null);return}
  if(a==='type'){drawTypeForm();return}
  if(a==='search'){await doTypeSearch();return}
@@ -927,7 +884,7 @@ document.addEventListener('input',e=>{const el=e.target.closest('[data-ad]');if(
 async function onMemoPhoto(file){
  const b=findB(DETAIL);if(!b)return;
  const photo=await shrinkImage(file,1100,.72);b.memoPhotos=b.memoPhotos||[];b.memoPhotos.push({data:photo,date:today()});await saveBook(b);renderDetail();
- if(!aiReady()){toast('写真を保存しました（文字にするには設定が必要です）',null,3500);return}
+ if(!S.apiKey){toast('写真を保存しました（文字にするには設定が必要です）',null,3500);return}
  setModal(`<div class="modal-bg"><div class="modal"><div class="progress" style="padding:30px 10px"><span class="spin"></span><b>メモを文字にしています</b><span style="font-size:.85em">10秒ほどかかります</span></div></div></div>`);
  try{const big=await shrinkImage(file,1800,.85);const r=await aiCall(big,MEMO_PROMPT,MEMO_TOOL);const text=(r.text||'').trim();
   setModal(`<div class="modal-bg"><div class="modal" role="dialog" aria-modal="true"><h3>読み取った文字</h3><p class="for">違うところは直してから追加してください。</p><div class="field" style="margin-top:8px"><textarea id="memoOcr" class="notebook" rows="8" aria-label="読み取った文字">${esc(text)}</textarea></div><div class="row"><button class="btn big" data-m="close">追加しない</button><button class="btn primary big" id="memoAppend">感想メモに追加</button></div></div></div>`);
@@ -981,7 +938,7 @@ async function onCode(isbn){
  const r=await lookup(isbn);SC.found={isbn,r};
  const tb=SC.target&&findB(SC.target);
  if(r.ok){const x=r.info;
-  box.innerHTML=`<div class="found"><div class="head">${coverHTML(x)}<div class="info"><p class="title">${esc(x.title)}</p><p class="author">${esc(x.author)}</p><dl class="kv">${x.publisher?`<dt>出版社</dt><dd>${esc(x.publisher)}</dd>`:''}${x.genre?`<dt>ジャンル</dt><dd>${esc(x.genre)}</dd>`:''}</dl></div></div>${tb?`<p class="muted" style="font-size:.85em;margin:12px 0 0">『${esc(tb.title)}』の情報を、この内容に更新します。</p><div class="row"><button class="btn" data-f="again">ちがう本</button><button class="btn primary" data-f="update">更新する</button></div>`:`<div class="row"><button class="btn" data-f="again">やめる</button><button class="btn primary" data-f="addwant">読みたい本に追加</button></div><div class="row" style="margin-top:8px"><button class="btn" data-f="addlib">借りている本として登録</button><button class="btn" data-f="addbuy">自分の本として登録</button></div>`}</div>`}
+  box.innerHTML=`<div class="found"><div class="head">${coverHTML(x)}<div class="info"><p class="title">${esc(x.title)}</p><p class="author">${esc(x.author)}</p><dl class="kv">${x.publisher?`<dt>出版社</dt><dd>${esc(x.publisher)}</dd>`:''}${x.genre?`<dt>ジャンル</dt><dd>${esc(x.genre)}</dd>`:''}</dl></div></div>${tb?`<p class="muted" style="font-size:.85em;margin:12px 0 0">『${esc(tb.title)}』の情報を、この内容に更新します。</p><div class="row"><button class="btn" data-f="again">ちがう本</button><button class="btn primary" data-f="update">更新する</button></div>`:`<div class="row"><button class="btn" data-f="again">やめる</button><button class="btn primary" data-f="addwant">読みたい本に追加</button></div><div class="row" style="margin-top:8px"><button class="btn" data-f="addlib">いま図書館で借りた</button><button class="btn" data-f="addbuy">買った本</button></div>`}</div>`}
  else{const off=r.reason==='offline';
   box.innerHTML=`<div class="found"><p style="margin:0 0 4px"><b>${off?'電波がないため、本の情報を調べられません':'この本の情報が見つかりませんでした'}</b></p><p class="muted" style="margin:0;font-size:.85em">ISBN ${isbn}<br>${off?'ISBNだけ先に記録し、電波のある場所で自動的に取得します。':'タイトルなどは手で入力できます。'}</p><div class="row"><button class="btn" data-f="again">やめる</button><button class="btn primary" data-f="${tb?'setisbn':'addpending'}">${tb?'ISBNだけ記録':'ISBNで登録'}</button></div></div>`}
 }
@@ -1020,7 +977,7 @@ function toCSV(){
 function parseCSV(t){t=t.replace(/^﻿/,'');const rows=[];let row=[],f='',q=false;for(let i=0;i<t.length;i++){const c=t[i];if(q){if(c==='"'){if(t[i+1]==='"'){f+='"';i++}else q=false}else f+=c}else if(c==='"')q=true;else if(c===','){row.push(f);f=''}else if(c==='\n'||c==='\r'){if(c==='\r'&&t[i+1]==='\n')i++;row.push(f);rows.push(row);row=[];f=''}else f+=c}if(f||row.length){row.push(f);rows.push(row)}return rows.filter(r=>r.some(x=>x!==''))}
 async function fromCSV(text){
  const rows=parseCSV(text);if(rows.length<1)throw 0;const head=rows[0].map(h=>h.trim());const idx={};CSV_COLS.forEach(([k,l])=>{const i=head.indexOf(l);if(i>=0)idx[k]=i});if(idx.title===undefined)throw 0;
- const stRev={...Object.fromEntries(Object.entries(ST).map(([k,v])=>[v.l,k])),'予約中':'reserved','届いた':'arrived','読み終えた':'done'};/* 旧版のCSVも読めるように */let add=0,upd=0;
+ const stRev=Object.fromEntries(Object.entries(ST).map(([k,v])=>[v.l,k]));let add=0,upd=0;
  for(const r of rows.slice(1)){const g=k=>idx[k]!==undefined?(r[idx[k]]||'').trim():'';if(!g('title'))continue;
   const b=blank();for(const [k] of CSV_COLS)if(idx[k]!==undefined)b[k]=k==='memo'?(r[idx.memo]||''):g(k);
   b.id=g('id')||uid();b.status=stRev[g('status')]||'want';b.route=g('route')==='図書館'?'library':g('route')==='購入'?'buy':'';b.finished=g('finished')==='はい'?true:g('finished')==='いいえ'?false:null;
@@ -1046,14 +1003,11 @@ document.addEventListener('click',async e=>{
  const sz=e.target.closest('[data-size]');if(sz){store.set('size',sz.dataset.size);applyPrefs();render();return}
  const th=e.target.closest('[data-themeopt]');if(th){store.set('theme',th.dataset.themeopt);applyPrefs();render();return}
  const md=e.target.closest('[data-model]');if(md){store.set('model',md.dataset.model);render();return}
- const pr=e.target.closest('[data-provider]');if(pr){store.set('provider',pr.dataset.provider);render();return}
  const ld=e.target.closest('[data-libdel]');if(ld){const i=+ld.dataset.libdel;const L=S.libs;const x=L.splice(i,1)[0];S.libs=L;render();toast(`「${x.name}」を削除しました`,()=>{const M=S.libs;M.splice(i,0,x);S.libs=M;render()});return}
  const a=e.target.closest('[data-act]');if(!a)return;const act=a.dataset.act;
  if(act==='wantall'){UI.wantAll=true;render()}
  if(act==='libadd'){const v=$('#newLib').value.trim();if(!v)return;if(S.libs.find(l=>l.name===v)){toast('登録済みです');return}S.libs=[...S.libs,{name:v,loanDays:14,holdDays:7}];render();toast('図書館を追加しました')}
  if(act==='keysave'){store.set('apiKey',$('#apiKey').value.trim());render();toast('保存しました')}
- if(act==='gkeysave'){store.set('geminiKey',$('#geminiKey').value.trim());store.set('geminiModel','');render();toast('保存しました')}
- if(act==='aitest'){a.disabled=true;toast('確認しています…',null,8000);try{await aiCall(TEST_IMG,'この画像に写っている数字を読んでください。',MEMO_TOOL);toast('つながりました。写真の読み取りが使えます',null,3500)}catch(err){toast(aiErrMsg(err),null,5000)}a.disabled=false}
  if(act==='csvsave'){saveFile(`読書帳_${stamp()}.csv`,toCSV(),'text/csv');store.set('lastBackup',Date.now());toast('「ダウンロード」に保存しました');render()}
  if(act==='csvshare'){if(await shareFile(`読書帳_${stamp()}.csv`,toCSV(),'text/csv')){store.set('lastBackup',Date.now());render()}}
  if(act==='csvload')$('#fileCsv').click();
@@ -1061,8 +1015,6 @@ document.addEventListener('click',async e=>{
  if(act==='jsonload')$('#fileJson').click();
  if(act==='sync'){if(!navigator.onLine){toast('電波のある場所でお試しください');return}toast('取得しています…');const n=await syncPending();toast(n?`${n}冊の情報を取得しました`:'取得できる本はありませんでした');render()}
  if(act==='wipe'){$('#wipeBox').innerHTML=`<div class="banner" style="background:var(--danger-soft);flex-direction:column;align-items:stretch"><p>${BOOKS.length}冊すべての記録を削除します。先に控えを保存してください。確認のため「削除」と入力してください。</p><input id="wipeTxt" style="min-height:48px;border-radius:10px;border:1px solid var(--rule);padding:0 12px;background:var(--surface)" aria-label="確認"><div class="row"><button class="btn" data-act="wipeNo">やめる</button><button class="btn danger" data-act="wipeYes">すべて削除</button></div></div>`}
- if(act==='delphotos'){const n=BOOKS.reduce((n,b)=>n+(b.adPhoto?1:0)+(b.memoPhotos||[]).length,0);if(!n){toast('削除する写真はありません');return}$('#wipeBox').innerHTML=`<div class="banner" style="background:var(--danger-soft);flex-direction:column;align-items:stretch"><p>新聞広告とメモの写真 ${n}枚を削除します。タイトル・著者・感想などの文字は残ります。</p><div class="row"><button class="btn" data-act="wipeNo">やめる</button><button class="btn danger" data-act="delphotosYes">写真を削除</button></div></div>`}
- if(act==='delphotosYes'){for(const b of BOOKS){if(b.adPhoto||(b.memoPhotos||[]).length){b.adPhoto='';b.memoPhotos=[];await saveBook(b)}}toast('写真を削除しました');render()}
  if(act==='wipeNo')$('#wipeBox').innerHTML='';
  if(act==='wipeYes'){if($('#wipeTxt').value.trim()!=='削除'){toast('「削除」と入力してください');return}await DB.clear();BOOKS=[];toast('すべて削除しました');render()}
 });
