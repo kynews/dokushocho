@@ -1,0 +1,16 @@
+{
+  "name": "読書帳",
+  "short_name": "読書帳",
+  "description": "図書館で借りる本と読んだ本を記録する読書ノート",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F6F5F0",
+  "theme_color": "#2E4A7D",
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
