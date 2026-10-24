@@ -421,8 +421,11 @@ const S={
  get notifyDays(){return store.get('notifyDays',2)},
  get notifyTime(){return store.get('notifyTime','09:00')},
  get apiKey(){return store.get('apiKey','')},
+ get geminiKey(){return store.get('geminiKey','')},
+ get provider(){return store.get('provider','gemini')},
  get model(){return store.get('model','claude-sonnet-5-5')}
 };
+const aiReady=()=>S.provider==='claude'?!!S.apiKey:!!S.geminiKey;
 function lib(name){return S.libs.find(l=>l.name===name)||{name,loanDays:14,holdDays:7}}
 
 /* ================= ISBN ================= */
@@ -516,10 +519,13 @@ async function applyInfo(b,info){
  return b
 }
 
-/* ================= AI 読み取り（Claude） ================= */
+/* ================= AI 読み取り（Gemini＝無料 / Claude＝有料） ================= */
 async function aiCall(imageDataURL,prompt,tool){
- const key=S.apiKey;if(!key)throw {code:'nokey'};
  if(!navigator.onLine)throw {code:'offline'};
+ return S.provider==='claude'?claudeCall(imageDataURL,prompt,tool):geminiCall(imageDataURL,prompt,tool)
+}
+async function claudeCall(imageDataURL,prompt,tool){
+ const key=S.apiKey;if(!key)throw {code:'nokey'};
  let r;
  try{r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
   body:JSON.stringify({model:S.model,max_tokens:3000,tools:[tool],tool_choice:{type:'tool',name:tool.name},messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:imageDataURL.split(',')[1]}},{type:'text',text:prompt}]}]})})}
@@ -527,9 +533,39 @@ async function aiCall(imageDataURL,prompt,tool){
  if(!r.ok){let m='';try{m=(await r.json()).error.message}catch{}throw {code:r.status===401?'badkey':(r.status===429||r.status>=500)?'busy':'other',message:m}}
  const j=await r.json();const tu=(j.content||[]).find(c=>c.type==='tool_use');if(!tu)throw {code:'other'};return tu.input
 }
-function aiErrMsg(e){return {nokey:'AI読み取りの設定がされていません（設定画面で設定できます）',badkey:'AIのキーが正しくありません。設定を確認してください',busy:'AIが混み合っています。少し待ってからもう一度お試しください',offline:'電波のある場所でもう一度お試しください'}[e&&e.code]||('読み取れませんでした'+(e&&e.message?'（'+e.message+'）':''))}
+/* Gemini: 無料枠。名前の変更に備えて、使えるモデルを順に試す */
+const GEMINI_MODELS=['gemini-flash-latest','gemini-2.5-flash','gemini-flash-lite-latest','gemini-2.5-flash-lite'];
+function toGeminiSchema(x){if(Array.isArray(x))return x.map(toGeminiSchema);if(!x||typeof x!=='object')return x;const o={};for(const [k,v] of Object.entries(x)){if(k==='type')o.type=String(v).toUpperCase();else if(k==='properties'){o.properties={};for(const [pk,pv] of Object.entries(v))o.properties[pk]=toGeminiSchema(pv)}else if(k==='items')o.items=toGeminiSchema(v);else o[k]=v}return o}
+function parseJSONText(t){try{return JSON.parse(t)}catch{}const m=String(t).match(/\{[\s\S]*\}/);if(m){try{return JSON.parse(m[0])}catch{}}return null}
+async function geminiCall(imageDataURL,prompt,tool){
+ const key=S.geminiKey;if(!key)throw {code:'nokey'};
+ const body=JSON.stringify({contents:[{role:'user',parts:[{inline_data:{mime_type:'image/jpeg',data:imageDataURL.split(',')[1]}},{text:prompt+'\n\n結果はJSONだけで返してください。'}]}],generationConfig:{temperature:0.1,responseMimeType:'application/json',responseSchema:toGeminiSchema(tool.input_schema)}});
+ const first=store.get('geminiModel','');const order=[...new Set([first,...GEMINI_MODELS].filter(Boolean))];
+ let lastErr={code:'other'};
+ for(const model of order){
+  let r;
+  try{r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':key},body})}
+  catch{throw {code:'offline'}}
+  if(r.ok){
+   const j=await r.json();const parts=(j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts)||[];
+   const text=parts.filter(p=>!p.thought&&p.text).map(p=>p.text).join('');const out=parseJSONText(text);
+   if(out){store.set('geminiModel',model);return out}
+   lastErr={code:'other',message:'読み取り結果が空でした'};continue
+  }
+  let m='',st='';try{const e=(await r.json()).error;m=e.message||'';st=e.status||''}catch{}
+  if(r.status===400&&/API key|API_KEY/i.test(m))throw {code:'badkey'};
+  if(r.status===401||r.status===403)throw {code:'badkey',message:m};
+  if(r.status===404){lastErr={code:'other',message:m};continue}          /* そのモデルが無い → 次へ */
+  if(r.status===429){lastErr={code:'quota'};continue}                    /* 今日の無料回数を超えた → 軽いモデルへ */
+  if(r.status>=500){lastErr={code:'busy'};continue}
+  lastErr={code:'other',message:m};continue
+ }
+ throw lastErr
+}
+function aiErrMsg(e){return {quota:'今日の無料で使える回数を使い切りました。明日もう一度お試しください（それまでは手で入力できます）',nokey:'AI読み取りの設定がされていません（設定画面で設定できます）',badkey:'AIのキーが正しくありません。設定を確認してください',busy:'AIが混み合っています。少し待ってからもう一度お試しください',offline:'電波のある場所でもう一度お試しください'}[e&&e.code]||('読み取れませんでした'+(e&&e.message?'（'+e.message+'）':''))}
 const AD_TOOL={name:'record_books',description:'新聞広告に載っている本を記録する',input_schema:{type:'object',properties:{books:{type:'array',items:{type:'object',properties:{title:{type:'string',description:'本のタイトル（巻数を含む。キャッチコピーや帯の文句は含めない）'},author:{type:'string',description:'著者名（複数は「、」区切り。訳者は名前の後に「（訳）」）'},publisher:{type:'string',description:'出版社名'},genre:{type:'string',enum:GENRES}},required:['title','author','publisher','genre']}}},required:['books']}};
 const AD_PROMPT='これは日本の新聞に載った書籍の広告（出版社の新刊広告など）の写真です。縦書き・横書きが混在しています。広告されている本をすべて見つけ、タイトル・著者・出版社・ジャンルを記録してください。キャッチコピー、推薦文、価格、書店名は無視します。出版社名は広告の上下や隅にロゴとして1つだけ書かれていることが多いので、その場合は全部の本に同じ出版社を入れてください。読みにくい文字は文脈から最も自然な表記を推測し、どうしても分からない項目は空文字にしてください。';
+const TEST_IMG=(()=>{try{const c=document.createElement('canvas');c.width=240;c.height=80;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,240,80);x.fillStyle='#000';x.font='40px sans-serif';x.fillText('12345',40,55);return c.toDataURL('image/jpeg',.9)}catch{return ''}})();
 const MEMO_TOOL={name:'transcribe',description:'手書きの読書メモをテキストにする',input_schema:{type:'object',properties:{text:{type:'string',description:'書かれている文章（改行を保つ）'}},required:['text']}};
 const MEMO_PROMPT='これは本を読んだ人が紙に手書きした感想メモの写真です。書かれている文字をそのまま正確に文字にしてください。言い回しや誤字は直さず、改行は元の位置に近い形で保ってください。どうしても読めない文字は「〓」にしてください。罫線や紙の模様は無視します。';
 
@@ -658,9 +694,15 @@ function viewSettings(){
   <button data-act="jsonsave">${I.down}<div class="grow">写真も含めた完全な控え<small>メモや広告の写真も残したいとき（ファイルが大きくなります）</small></div></button>
   <button data-act="jsonload">${I.up}<div class="grow">完全な控えから戻す</div></button>
  </div><p class="note">記録はインターネット上には送られず、このスマホの中だけに保存されます。アプリを消すと記録も消えるので、月に一度くらい控えを保存してください。</p>`;
- h+=`<h2 class="sec">AIによる写真の読み取り</h2><div class="set"><div>${I.spark}<div class="grow">Claude APIキー<small>${S.apiKey?'設定済み':'未設定（新聞広告・手書きメモの読み取りに必要）'}</small></div></div><div><input id="apiKey" type="password" placeholder="sk-ant-…" value="${esc(S.apiKey)}" autocomplete="off" style="flex:1;min-width:0" aria-label="APIキー"><button class="btn" data-act="keysave" style="min-height:46px">保存</button></div><div><div class="grow">読み取りの精度</div><div class="seg"><button data-model="claude-sonnet-5-5" aria-pressed="${S.model==='claude-sonnet-5-5'}">高精度</button><button data-model="claude-haiku-5-5" aria-pressed="${S.model==='claude-haiku-5-5'}">節約</button></div></div></div>
-  <p class="note">写真を読み取るときだけ、その写真がAnthropic社のAI（Claude）に送られます。記録そのものは送られません。キーはこのスマホの中だけに保存されます。</p>`;
- h+=`<h2 class="sec">そのほか</h2><div class="set"><button data-act="sync">${I.refresh}<div class="grow">未取得の本の情報を取得<small>${BOOKS.filter(b=>b.pending).length}冊</small></div></button><button data-act="wipe" style="color:var(--danger)">${I.trash}<div class="grow">すべての記録を削除</div></button></div><div id="wipeBox"></div><p class="note">読書帳 v2.0</p>`;
+ const pv=S.provider;
+ h+=`<h2 class="sec">AIによる写真の読み取り</h2><div class="set">
+  <div>${I.spark}<div class="grow">使うAI<small>新聞広告・手書きメモの読み取りに使います</small></div><div class="seg"><button data-provider="gemini" aria-pressed="${pv==='gemini'}">Gemini（無料）</button><button data-provider="claude" aria-pressed="${pv==='claude'}">Claude（有料）</button></div></div>
+  ${pv==='gemini'?`<div><div class="grow">GeminiのAPIキー<small>${S.geminiKey?'設定済み':'未設定'}・Googleアカウントで無料で作れます</small></div></div><div><input id="geminiKey" type="password" placeholder="AIza…" value="${esc(S.geminiKey)}" autocomplete="off" style="flex:1;min-width:0" aria-label="GeminiのAPIキー"><button class="btn" data-act="gkeysave" style="min-height:46px">保存</button></div>`
+  :`<div><div class="grow">ClaudeのAPIキー<small>${S.apiKey?'設定済み':'未設定'}</small></div></div><div><input id="apiKey" type="password" placeholder="sk-ant-…" value="${esc(S.apiKey)}" autocomplete="off" style="flex:1;min-width:0" aria-label="ClaudeのAPIキー"><button class="btn" data-act="keysave" style="min-height:46px">保存</button></div><div><div class="grow">読み取りの精度</div><div class="seg"><button data-model="claude-sonnet-5-5" aria-pressed="${S.model==='claude-sonnet-5-5'}">高精度</button><button data-model="claude-haiku-5-5" aria-pressed="${S.model==='claude-haiku-5-5'}">節約</button></div></div>`}
+  ${aiReady()?`<button data-act="aitest">${I.check}<div class="grow">つながるか確認する</div></button>`:''}
+ </div>
+ <p class="note">${pv==='gemini'?'Gemini（Google）は無料で使えます。1日に使える回数に上限があり、上限を超えるとその日は使えません（翌日には戻ります）。無料版では、送った写真がGoogleのAIの改善に使われることがあります。新聞広告や読書メモ以外の、住所・電話番号などが写った写真は撮らないでください。':'Claude（Anthropic）は使った分だけ料金がかかります。送った写真がAIの学習に使われることはありません。'}記録の一覧そのものが送られることはありません。キーはこのスマホの中だけに保存されます。</p>`;
+ h+=`<h2 class="sec">そのほか</h2><div class="set"><button data-act="sync">${I.refresh}<div class="grow">未取得の本の情報を取得<small>${BOOKS.filter(b=>b.pending).length}冊</small></div></button><button data-act="wipe" style="color:var(--danger)">${I.trash}<div class="grow">すべての記録を削除</div></button></div><div id="wipeBox"></div><p class="note">読書帳 v2.1</p>`;
  return h+'</main>'
 }
 
@@ -829,7 +871,7 @@ function openAdd(){
 async function onAdd(e){
  const t=e.target.closest('[data-a]');if(!t)return;const a=t.dataset.a;
  if(a==='close'){closeSheet();return}
- if(a==='ad'){if(!S.apiKey){drawTypeForm('新聞広告の読み取りには、最初に設定が必要です（設定 → AIによる写真の読み取り）。それまではタイトルを入力して登録できます。');return}$('#fileAd').click();return}
+ if(a==='ad'){if(!aiReady()){drawTypeForm('新聞広告の読み取りには、最初に設定が必要です（設定 → AIによる写真の読み取り）。それまではタイトルを入力して登録できます。');return}$('#fileAd').click();return}
  if(a==='scan'){openScanner(null);return}
  if(a==='type'){drawTypeForm();return}
  if(a==='search'){await doTypeSearch();return}
@@ -884,7 +926,7 @@ document.addEventListener('input',e=>{const el=e.target.closest('[data-ad]');if(
 async function onMemoPhoto(file){
  const b=findB(DETAIL);if(!b)return;
  const photo=await shrinkImage(file,1100,.72);b.memoPhotos=b.memoPhotos||[];b.memoPhotos.push({data:photo,date:today()});await saveBook(b);renderDetail();
- if(!S.apiKey){toast('写真を保存しました（文字にするには設定が必要です）',null,3500);return}
+ if(!aiReady()){toast('写真を保存しました（文字にするには設定が必要です）',null,3500);return}
  setModal(`<div class="modal-bg"><div class="modal"><div class="progress" style="padding:30px 10px"><span class="spin"></span><b>メモを文字にしています</b><span style="font-size:.85em">10秒ほどかかります</span></div></div></div>`);
  try{const big=await shrinkImage(file,1800,.85);const r=await aiCall(big,MEMO_PROMPT,MEMO_TOOL);const text=(r.text||'').trim();
   setModal(`<div class="modal-bg"><div class="modal" role="dialog" aria-modal="true"><h3>読み取った文字</h3><p class="for">違うところは直してから追加してください。</p><div class="field" style="margin-top:8px"><textarea id="memoOcr" class="notebook" rows="8" aria-label="読み取った文字">${esc(text)}</textarea></div><div class="row"><button class="btn big" data-m="close">追加しない</button><button class="btn primary big" id="memoAppend">感想メモに追加</button></div></div></div>`);
@@ -1003,11 +1045,14 @@ document.addEventListener('click',async e=>{
  const sz=e.target.closest('[data-size]');if(sz){store.set('size',sz.dataset.size);applyPrefs();render();return}
  const th=e.target.closest('[data-themeopt]');if(th){store.set('theme',th.dataset.themeopt);applyPrefs();render();return}
  const md=e.target.closest('[data-model]');if(md){store.set('model',md.dataset.model);render();return}
+ const pr=e.target.closest('[data-provider]');if(pr){store.set('provider',pr.dataset.provider);render();return}
  const ld=e.target.closest('[data-libdel]');if(ld){const i=+ld.dataset.libdel;const L=S.libs;const x=L.splice(i,1)[0];S.libs=L;render();toast(`「${x.name}」を削除しました`,()=>{const M=S.libs;M.splice(i,0,x);S.libs=M;render()});return}
  const a=e.target.closest('[data-act]');if(!a)return;const act=a.dataset.act;
  if(act==='wantall'){UI.wantAll=true;render()}
  if(act==='libadd'){const v=$('#newLib').value.trim();if(!v)return;if(S.libs.find(l=>l.name===v)){toast('登録済みです');return}S.libs=[...S.libs,{name:v,loanDays:14,holdDays:7}];render();toast('図書館を追加しました')}
  if(act==='keysave'){store.set('apiKey',$('#apiKey').value.trim());render();toast('保存しました')}
+ if(act==='gkeysave'){store.set('geminiKey',$('#geminiKey').value.trim());store.set('geminiModel','');render();toast('保存しました')}
+ if(act==='aitest'){a.disabled=true;toast('確認しています…',null,8000);try{await aiCall(TEST_IMG,'この画像に写っている数字を読んでください。',MEMO_TOOL);toast('つながりました。写真の読み取りが使えます',null,3500)}catch(err){toast(aiErrMsg(err),null,5000)}a.disabled=false}
  if(act==='csvsave'){saveFile(`読書帳_${stamp()}.csv`,toCSV(),'text/csv');store.set('lastBackup',Date.now());toast('「ダウンロード」に保存しました');render()}
  if(act==='csvshare'){if(await shareFile(`読書帳_${stamp()}.csv`,toCSV(),'text/csv')){store.set('lastBackup',Date.now());render()}}
  if(act==='csvload')$('#fileCsv').click();
